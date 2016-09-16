@@ -278,6 +278,17 @@ public final class BriteDatabase implements Closeable {
   }
 
   /**
+   * Start a Step-Builder Pattern to create a {@linkplain QueryObservable} with the possibility to
+   * add either a {@code table} or a {@code tag} trigger.
+   * <p>
+   *
+   * @see BriteDatabase#createQuery(String, String, String...)
+   */
+  public QueryStep buildQuery() {
+    return new QueryObservableBuilder();
+  }
+
+  /**
    * Create an observable which will notify subscribers with a {@linkplain Query query} for
    * execution. Subscribers are responsible for <b>always</b> closing {@link Cursor} instance
    * returned from the {@link Query}.
@@ -348,10 +359,14 @@ public final class BriteDatabase implements Closeable {
       throw new IllegalStateException("Cannot create observable query in transaction. "
           + "Use query() for a query inside a transaction.");
     }
+    return createQueryObservable(tableFilter, sql, args);
+  }
 
-    DatabaseQuery query = new DatabaseQuery(tableFilter, sql, args);
+  @NonNull private QueryObservable createQueryObservable(Func1<Set<String>, Boolean> filters,
+      String sql, String... args) {
+    DatabaseQuery query = new DatabaseQuery(filters, sql, args);
     final Observable<Query> queryObservable = triggers //
-        .filter(tableFilter) // Only trigger on tables we care about.
+        .filter(filters) // Only trigger on tables we care about.
         .map(query) // DatabaseQuery maps to itself to save an allocation.
         .onBackpressureLatest() // Guard against uncontrollable frequency of upstream emissions.
         .startWith(query) //
@@ -391,7 +406,21 @@ public final class BriteDatabase implements Closeable {
    */
   // TODO @WorkerThread
   public long insert(@NonNull String table, @NonNull ContentValues values) {
-    return insert(table, values, CONFLICT_NONE);
+    return insert(table, null, values, CONFLICT_NONE);
+  }
+
+  /**
+   * Insert a row into the specified {@code table} and notify any subscribed {@code tag}.
+   *
+   * @see SQLiteDatabase#insert(String, String, ContentValues)
+   */
+  public long insert(@NonNull String table, @NonNull ContentValues values, @NonNull String tag) {
+    return insert(table, tag, values, CONFLICT_NONE);
+  }
+
+  public long insert(@NonNull String table, @NonNull ContentValues values,
+      @ConflictAlgorithm int conflictAlgorithm) {
+    return insert(table, null, values, conflictAlgorithm);
   }
 
   /**
@@ -400,7 +429,7 @@ public final class BriteDatabase implements Closeable {
    * @see SQLiteDatabase#insertWithOnConflict(String, String, ContentValues, int)
    */
   // TODO @WorkerThread
-  public long insert(@NonNull String table, @NonNull ContentValues values,
+  public long insert(@NonNull String table, @Nullable String tag, @NonNull ContentValues values,
       @ConflictAlgorithm int conflictAlgorithm) {
     SQLiteDatabase db = getWriteableDatabase();
 
@@ -413,8 +442,8 @@ public final class BriteDatabase implements Closeable {
     if (logging) log("INSERT id: %s", rowId);
 
     if (rowId != -1) {
-      // Only send a table trigger if the insert was successful.
-      sendTableTrigger(Collections.singleton(table));
+      // Only send a trigger if the insert was successful.
+      sendTableTrigger(Collections.singleton(tag != null ? tag : table));
     }
     return rowId;
   }
@@ -425,9 +454,14 @@ public final class BriteDatabase implements Closeable {
    *
    * @see SQLiteDatabase#delete(String, String, String[])
    */
-  // TODO @WorkerThread
   public int delete(@NonNull String table, @Nullable String whereClause,
       @Nullable String... whereArgs) {
+    return delete(table, null, whereClause, whereArgs);
+  }
+
+  // TODO @WorkerThread
+  public int delete(@NonNull String table, @Nullable String tag, @Nullable String whereClause,
+      @Nullable String[] whereArgs) {
     SQLiteDatabase db = getWriteableDatabase();
 
     if (logging) {
@@ -439,8 +473,8 @@ public final class BriteDatabase implements Closeable {
     if (logging) log("DELETE affected %s %s", rows, rows != 1 ? "rows" : "row");
 
     if (rows > 0) {
-      // Only send a table trigger if rows were affected.
-      sendTableTrigger(Collections.singleton(table));
+      // Only send a trigger if the insert was successful.
+      sendTableTrigger(Collections.singleton(tag != null ? tag : table));
     }
     return rows;
   }
@@ -454,7 +488,12 @@ public final class BriteDatabase implements Closeable {
   // TODO @WorkerThread
   public int update(@NonNull String table, @NonNull ContentValues values,
       @Nullable String whereClause, @Nullable String... whereArgs) {
-    return update(table, values, CONFLICT_NONE, whereClause, whereArgs);
+    return update(table, null, values, CONFLICT_NONE, whereClause, whereArgs);
+  }
+
+  public int update(@NonNull String table, String tag, @NonNull ContentValues values,
+      @Nullable String whereClause, @Nullable String... whereArgs) {
+    return update(table, tag, values, CONFLICT_NONE, whereClause, whereArgs);
   }
 
   /**
@@ -464,7 +503,7 @@ public final class BriteDatabase implements Closeable {
    * @see SQLiteDatabase#updateWithOnConflict(String, ContentValues, String, String[], int)
    */
   // TODO @WorkerThread
-  public int update(@NonNull String table, @NonNull ContentValues values,
+  public int update(@NonNull String table, @Nullable String tag, @NonNull ContentValues values,
       @ConflictAlgorithm int conflictAlgorithm, @Nullable String whereClause,
       @Nullable String... whereArgs) {
     SQLiteDatabase db = getWriteableDatabase();
@@ -479,8 +518,8 @@ public final class BriteDatabase implements Closeable {
     if (logging) log("UPDATE affected %s %s", rows, rows != 1 ? "rows" : "row");
 
     if (rows > 0) {
-      // Only send a table trigger if rows were affected.
-      sendTableTrigger(Collections.singleton(table));
+      // Only send a trigger if the insert was successful.
+      sendTableTrigger(Collections.singleton(tag != null ? tag : table));
     }
     return rows;
   }
@@ -706,6 +745,57 @@ public final class BriteDatabase implements Closeable {
 
     @Override public Query call(Set<String> ignored) {
       return this;
+    }
+  }
+
+  interface QueryStep {
+    TriggerStep addQuery(String sql, String... args);
+  }
+
+  interface TriggerStep {
+    BuildStep addTableTrigger(String table);
+    BuildStep addTagTrigger(String tag);
+  }
+
+  interface BuildStep {
+    QueryObservable build();
+  }
+
+  final class QueryObservableBuilder implements QueryStep, TriggerStep, BuildStep {
+
+    private String sql;
+    private String[] args;
+    private String table;
+    private String tag;
+
+    @Override public TriggerStep addQuery(String sql, String... args) {
+      this.sql = sql;
+      this.args = args;
+      return this;
+    }
+
+    @Override public BuildStep addTableTrigger(String table) {
+      this.table = table;
+      return this;
+    }
+
+    @Override public BuildStep addTagTrigger(String tag) {
+      this.tag = tag;
+      return this;
+    }
+
+    @Override public QueryObservable build() {
+      Func1<Set<String>, Boolean> filters = new Func1<Set<String>, Boolean>() {
+        @Override public Boolean call(Set<String> triggers) {
+          return triggers.contains(table) || triggers.contains(tag);
+        }
+
+        @Override public String toString() {
+          return table;
+        }
+      };
+
+      return createQueryObservable(filters, sql, args);
     }
   }
 }

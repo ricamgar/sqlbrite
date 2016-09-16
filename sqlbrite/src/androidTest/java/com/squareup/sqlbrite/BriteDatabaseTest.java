@@ -170,6 +170,66 @@ public final class BriteDatabaseTest {
         .isExhausted();
   }
 
+  @Test public void queryBuilderObservesTableAndNotTagInsert() {
+    db.buildQuery().addQuery(SELECT_EMPLOYEES).addTableTrigger(TABLE_EMPLOYEE).build().subscribe(o);
+    o.assertCursor()
+        .hasRow("alice", "Alice Allison")
+        .hasRow("bob", "Bob Bobberson")
+        .hasRow("eve", "Eve Evenson")
+        .isExhausted();
+
+    db.insert(TABLE_EMPLOYEE, employee("john", "John Johnson"));
+    o.assertCursor()
+        .hasRow("alice", "Alice Allison")
+        .hasRow("bob", "Bob Bobberson")
+        .hasRow("eve", "Eve Evenson")
+        .hasRow("john", "John Johnson")
+        .isExhausted();
+
+    db.insert(TABLE_EMPLOYEE, employee("rik", "Rik Johnson"), "myTag");
+    o.assertNoMoreEvents();
+  }
+
+  @Test public void queryBuilderObservesTagAndNotTableInsert() {
+    db.buildQuery().addQuery(SELECT_EMPLOYEES).addTagTrigger("myTag").build().subscribe(o);
+    o.assertCursor()
+        .hasRow("alice", "Alice Allison")
+        .hasRow("bob", "Bob Bobberson")
+        .hasRow("eve", "Eve Evenson")
+        .isExhausted();
+
+    db.insert(TABLE_EMPLOYEE, employee("john", "John Johnson"), "myTag");
+    o.assertCursor()
+        .hasRow("alice", "Alice Allison")
+        .hasRow("bob", "Bob Bobberson")
+        .hasRow("eve", "Eve Evenson")
+        .hasRow("john", "John Johnson")
+        .isExhausted();
+
+    db.insert(TABLE_EMPLOYEE, employee("rik", "Rik Johnson"));
+    o.assertNoMoreEvents();
+  }
+
+  @Test public void queryObservesTableAndNotTagInsert() {
+    db.createQuery(TABLE_EMPLOYEE, SELECT_EMPLOYEES).subscribe(o);
+    o.assertCursor()
+        .hasRow("alice", "Alice Allison")
+        .hasRow("bob", "Bob Bobberson")
+        .hasRow("eve", "Eve Evenson")
+        .isExhausted();
+
+    db.insert(TABLE_EMPLOYEE, employee("john", "John Johnson"));
+    o.assertCursor()
+        .hasRow("alice", "Alice Allison")
+        .hasRow("bob", "Bob Bobberson")
+        .hasRow("eve", "Eve Evenson")
+        .hasRow("john", "John Johnson")
+        .isExhausted();
+
+    db.insert(TABLE_EMPLOYEE, employee("rik", "Rik Johnson"), "myTag");
+    o.assertNoMoreEvents();
+  }
+
   @Test public void queryInitialValueAndTriggerUsesScheduler() {
     scheduler.runTasksImmediately(false);
 
@@ -221,6 +281,29 @@ public final class BriteDatabaseTest {
         .hasRow("bob", "Robert Bobberson")
         .hasRow("eve", "Eve Evenson")
         .isExhausted();
+  }
+
+  @Test public void queryBuilderObservesTagAndNotTableUpdate() {
+    db.buildQuery().addQuery(SELECT_EMPLOYEES).addTagTrigger("myTag").build().subscribe(o);
+    o.assertCursor()
+        .hasRow("alice", "Alice Allison")
+        .hasRow("bob", "Bob Bobberson")
+        .hasRow("eve", "Eve Evenson")
+        .isExhausted();
+
+    ContentValues values = new ContentValues();
+    values.put(NAME, "Robert Bobberson");
+    db.update(TABLE_EMPLOYEE, "myTag", values, USERNAME + " = 'bob'");
+    o.assertCursor()
+        .hasRow("alice", "Alice Allison")
+        .hasRow("bob", "Robert Bobberson")
+        .hasRow("eve", "Eve Evenson")
+        .isExhausted();
+
+    ContentValues values2 = new ContentValues();
+    values2.put(NAME, "Ally Allison");
+    db.update(TABLE_EMPLOYEE, values2, USERNAME + " = 'alice'");
+    o.assertNoMoreEvents();
   }
 
   @Test public void queryNotNotifiedWhenUpdateAffectsZeroRows() {
